@@ -82,6 +82,10 @@ app.post("/messages", async (req, res) => {
   }
 });
 
+app.get('/health', (req, res) => {
+  res.status(200).send('Server is running');
+});
+
 app.listen(port, () => {
   console.log(`Server live on port ${port}`);
 });
