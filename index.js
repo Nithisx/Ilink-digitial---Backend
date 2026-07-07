@@ -7,6 +7,15 @@ const app = express();
 // Automatically parse JSON request bodies (important for incoming POST requests)
 app.use(express.json()); 
 
+// Middleware to handle JSON parsing errors gracefully and log them
+app.use((err, req, res, next) => {
+  if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
+    console.error(`[Express] JSON parsing error:`, err.message);
+    return res.status(400).json({ error: 'Invalid JSON request body' });
+  }
+  next();
+});
+
 const port = process.env.PORT || 3000;
 
 // 1. Initialize the MCP Server instance
@@ -65,25 +74,73 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
 });
 
 // --- HTTP ENDPOINTS FOR CLOUD HOSTING ---
-let sseTransport = null;
+
+// Store active transports mapped by sessionId to handle multiple client sessions correctly
+const transports = new Map();
 
 // Endpoint 1: The Agent Builder connects via GET to establish the connection stream
 app.get("/sse", async (req, res) => {
-  sseTransport = new SSEServerTransport("/messages", res);
-  await mcpServer.connect(sseTransport);
+  console.log(`[SSE GET] New connection request from ${req.ip}`);
+  console.log(`[SSE GET] Request Headers:`, JSON.stringify(req.headers, null, 2));
+
+  try {
+    const transport = new SSEServerTransport("/messages", res);
+    const sessionId = transport.sessionId;
+    
+    transports.set(sessionId, transport);
+    console.log(`[SSE GET] Created transport session: ${sessionId}`);
+
+    transport.onclose = () => {
+      console.log(`[SSE] Transport session closed: ${sessionId}`);
+      transports.delete(sessionId);
+    };
+
+    transport.onerror = (error) => {
+      console.error(`[SSE] Transport session error for ${sessionId}:`, error);
+    };
+
+    await mcpServer.connect(transport);
+    console.log(`[SSE GET] Connected MCP server to transport session: ${sessionId}`);
+  } catch (error) {
+    console.error("[SSE GET] Failed to establish SSE transport connection:", error);
+    if (!res.headersSent) {
+      res.status(500).send("Failed to establish SSE connection");
+    }
+  }
 });
 
 // Endpoint 2: The Agent Builder sends request commands via POST
 app.post("/messages", async (req, res) => {
-  if (sseTransport) {
-    await sseTransport.handleMessage(req, res);
+  const sessionId = req.query.sessionId;
+  console.log(`[POST Message] Received message request for sessionId: ${sessionId}`);
+  console.log(`[POST Message] Request body:`, JSON.stringify(req.body, null, 2));
+
+  if (!sessionId) {
+    console.warn(`[POST Message] Missing sessionId in query parameters`);
+    res.status(400).send("Missing sessionId query parameter");
+    return;
+  }
+
+  const transport = transports.get(sessionId);
+  if (transport) {
+    try {
+      // Forward the parsed request body to the correct transport instance
+      await transport.handlePostMessage(req, res, req.body);
+      console.log(`[POST Message] Successfully processed message for sessionId: ${sessionId}`);
+    } catch (error) {
+      console.error(`[POST Message] Error handling message for sessionId ${sessionId}:`, error);
+      if (!res.headersSent) {
+        res.status(500).send("Internal server error handling message");
+      }
+    }
   } else {
-    res.status(400).send("No active SSE session");
+    console.warn(`[POST Message] Active transport not found for sessionId: ${sessionId}`);
+    res.status(400).send(`No active SSE session found for sessionId: ${sessionId}`);
   }
 });
 
 app.get('/health', (req, res) => {
-  res.status(200).send('Server is running');
+  res.status(200).send('Server is running 2');
 });
 
 app.listen(port, () => {
