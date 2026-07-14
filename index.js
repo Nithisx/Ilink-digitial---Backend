@@ -79,7 +79,7 @@ function createMcpServer() {
 
 // --- HTTP ENDPOINTS FOR CLOUD HOSTING ---
 
-// Store active transports mapped by sessionId to handle multiple client sessions correctly
+// Store active session metadata mapped by sessionId to handle multiple client sessions and timeouts
 const transports = new Map();
 
 // Endpoint 1: The Agent Builder connects via GET to establish the connection stream
@@ -92,11 +92,35 @@ app.get("/sse", async (req, res) => {
     const transport = new SSEServerTransport("/messages", res);
     const sessionId = transport.sessionId;
     
-    transports.set(sessionId, transport);
+    const session = {
+      transport,
+      res,
+      timeoutId: null,
+      resetTimeout: () => {
+        if (session.timeoutId) {
+          clearTimeout(session.timeoutId);
+        }
+        session.timeoutId = setTimeout(() => {
+          console.log(`[SSE] Session ${sessionId} idle timeout triggered (15 minutes). Closing connection...`);
+          if (!res.writableEnded) {
+            res.end();
+          }
+          transports.delete(sessionId);
+        }, 15 * 60 * 1000); // 15 minutes
+      }
+    };
+
+    // Initialize the idle timeout
+    session.resetTimeout();
+
+    transports.set(sessionId, session);
     console.log(`[SSE GET] Created transport session: ${sessionId}`);
 
     transport.onclose = () => {
       console.log(`[SSE] Transport session closed: ${sessionId}`);
+      if (session.timeoutId) {
+        clearTimeout(session.timeoutId);
+      }
       transports.delete(sessionId);
     };
 
@@ -126,11 +150,14 @@ app.post("/messages", async (req, res) => {
     return;
   }
 
-  const transport = transports.get(sessionId);
-  if (transport) {
+  const session = transports.get(sessionId);
+  if (session) {
     try {
+      // Reset the idle timeout on incoming message activity
+      session.resetTimeout();
+
       // Forward the parsed request body to the correct transport instance
-      await transport.handlePostMessage(req, res, req.body);
+      await session.transport.handlePostMessage(req, res, req.body);
       console.log(`[POST Message] Successfully processed message for sessionId: ${sessionId}`);
     } catch (error) {
       console.error(`[POST Message] Error handling message for sessionId ${sessionId}:`, error);
