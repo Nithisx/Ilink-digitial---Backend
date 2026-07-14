@@ -18,60 +18,64 @@ app.use((err, req, res, next) => {
 
 const port = process.env.PORT || 3000;
 
-// 1. Initialize the MCP Server instance
-const mcpServer = new Server(
-  { name: "tavily-search-server", version: "1.0.0" },
-  { capabilities: { tools: {} } }
-);
+// 1. Helper function to create a new MCP Server instance per connection
+function createMcpServer() {
+  const mcpServer = new Server(
+    { name: "tavily-search-server", version: "1.0.0" },
+    { capabilities: { tools: {} } }
+  );
 
-// 2. Define the tool (FIXED: Added ListToolsRequestSchema)
-mcpServer.setRequestHandler(ListToolsRequestSchema, async () => {
-  return {
-    tools: [
-      {
-        name: "search_tool",
-        description: "Searches the web using Tavily API.",
-        inputSchema: {
-          type: "object",
-          properties: {
-            query: { type: "string", description: "The search query." }
-          },
-          required: ["query"]
+  // Define the tool
+  mcpServer.setRequestHandler(ListToolsRequestSchema, async () => {
+    return {
+      tools: [
+        {
+          name: "search_tool",
+          description: "Searches the web using Tavily API.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              query: { type: "string", description: "The search query." }
+            },
+            required: ["query"]
+          }
         }
+      ]
+    };
+  });
+
+  // Handle execution logic
+  mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const { name, arguments: args } = request.params;
+
+    if (name === "search_tool") {
+      const apiKey = process.env.TAVILY_API_KEY;
+      if (!apiKey) {
+        return { isError: true, content: [{ type: "text", text: "Missing API key." }] };
       }
-    ]
-  };
-});
 
-// 3. Handle execution logic (FIXED: Added CallToolRequestSchema)
-mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
-
-  if (name === "search_tool") {
-    const apiKey = process.env.TAVILY_API_KEY;
-    if (!apiKey) {
-      return { isError: true, content: [{ type: "text", text: "Missing API key." }] };
+      try {
+        const response = await fetch("https://api.tavily.com/search", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            api_key: apiKey,
+            query: args.query,
+            topic: "general",
+            search_depth: "basic"
+          })
+        });
+        const data = await response.json();
+        return { content: [{ type: "text", text: JSON.stringify(data) }] };
+      } catch (e) {
+        return { isError: true, content: [{ type: "text", text: e.message }] };
+      }
     }
+    throw new Error("Tool not found");
+  });
 
-    try {
-      const response = await fetch("https://api.tavily.com/search", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          api_key: apiKey,
-          query: args.query,
-          topic: "general",
-          search_depth: "basic"
-        })
-      });
-      const data = await response.json();
-      return { content: [{ type: "text", text: JSON.stringify(data) }] };
-    } catch (e) {
-      return { isError: true, content: [{ type: "text", text: e.message }] };
-    }
-  }
-  throw new Error("Tool not found");
-});
+  return mcpServer;
+}
 
 // --- HTTP ENDPOINTS FOR CLOUD HOSTING ---
 
@@ -84,6 +88,7 @@ app.get("/sse", async (req, res) => {
   console.log(`[SSE GET] Request Headers:`, JSON.stringify(req.headers, null, 2));
 
   try {
+    const mcpServer = createMcpServer();
     const transport = new SSEServerTransport("/messages", res);
     const sessionId = transport.sessionId;
     
